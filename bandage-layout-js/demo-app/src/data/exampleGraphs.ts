@@ -131,7 +131,9 @@ export const exampleGraphs: Record<string, Graph> = {
   },
 }
 
-// Calculate statistics for a graph
+// Statistics are computed from the positive-strand nodes only so counts and
+// lengths describe the biological contigs rather than the doubled oriented
+// graph representation used for layout/rendering.
 export function getGraphStats(graph: Graph): GraphStats {
   const uniqueNodes = graph.nodes.filter(n => n.id.endsWith('+'))
   const lengths = uniqueNodes.map(n => n.length).sort((a, b) => a - b)

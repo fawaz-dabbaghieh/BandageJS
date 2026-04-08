@@ -4,6 +4,8 @@ import App from './App'
 import './App.css'
 
 export function AppLoader() {
+  // AppLoader owns the WASM worker lifecycle so App can assume the layout
+  // backend already exists and focus on UI state only.
   const [worker, setWorker] = useState<BandageLayoutWorker | null>(null)
   const [isWorkerReady, setIsWorkerReady] = useState(false)
   const [workerError, setWorkerError] = useState<string | null>(null)
@@ -35,6 +37,8 @@ export function AppLoader() {
 
     return () => {
       if (currentWorker) {
+        // Tear the worker down when the React tree unmounts to avoid leaving a
+        // background thread alive during navigation or hot reloads.
         currentWorker.terminate()
       }
     }

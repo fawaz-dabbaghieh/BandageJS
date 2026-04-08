@@ -3,6 +3,8 @@
 
 export class MockBandageLayoutWorker {
   constructor() {
+    // Mirror the real worker API closely so the UI can swap between the mock
+    // and WASM implementations without special cases.
     this._ready = Promise.resolve()
   }
 
@@ -18,7 +20,9 @@ export class MockBandageLayoutWorker {
     const delay = Math.min(100 + nodeCount * 2, 1000)
     await new Promise(resolve => setTimeout(resolve, delay))
 
-    // Generate mock positions with smooth curves
+    // Generate deterministic-looking geometry that is "good enough" for UI
+    // development without requiring the actual WASM layout engine.
+    // Create mock positions with smooth curves
     const nodePositions = {}
     const uniqueNodes = graph.nodes.filter(n => n.id.endsWith('+'))
 

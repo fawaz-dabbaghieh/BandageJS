@@ -29,6 +29,9 @@ export function LengthDistribution({
     canvas.style.height = height + 'px'
     ctx.scale(dpr, dpr)
 
+    // This chart only shows one strand per contig because the app stores both
+    // orientations in the graph model, but the length distribution should count
+    // each contig once.
     // Clear canvas
     ctx.fillStyle = '#1a1a1a'
     ctx.fillRect(0, 0, width, height)

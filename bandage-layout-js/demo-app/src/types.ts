@@ -1,4 +1,5 @@
-// Type definitions for the Bandage Layout application
+// Shared frontend data model used across parsing, worker messaging, layout
+// results, and the React UI.
 
 export interface GraphNode {
   id: string
@@ -25,6 +26,8 @@ export interface Graph {
   description: string
   nodes: GraphNode[]
   edges: GraphEdge[]
+  // Paths correspond to GFA P-lines and are optional because not every graph
+  // carries embedded traversal information.
   paths?: GraphPath[] // Optional paths from GFA P lines
 }
 

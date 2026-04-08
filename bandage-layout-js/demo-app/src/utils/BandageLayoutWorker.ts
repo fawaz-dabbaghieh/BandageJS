@@ -26,6 +26,8 @@ interface WorkerMessage {
 }
 
 export class BandageLayoutWorker {
+  // This class adapts the low-level worker messaging protocol into a small
+  // Promise-based API that the React components can await directly.
   private _worker: Worker | null = null
   private _ready = false
   private _messageId = 0
@@ -64,6 +66,8 @@ export class BandageLayoutWorker {
           const pending = this._pending.get(id)
           if (pending) {
             this._pending.delete(id)
+            // Each request is matched back to the Promise created in
+            // computeLayout() using the monotonically increasing message id.
             if (success && result) {
               pending.resolve(result)
             } else {
@@ -118,6 +122,8 @@ export class BandageLayoutWorker {
   ): Promise<LayoutComputation> {
     await this.ready()
 
+    // Measure duration on the UI side so callers get a consistent timing value
+    // even if the worker protocol changes later.
     const id = this._messageId++
     const startTime = performance.now()
 

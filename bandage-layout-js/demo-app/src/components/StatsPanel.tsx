@@ -7,6 +7,9 @@ interface StatsPanelProps {
 }
 
 export function StatsPanel({ graph, layoutDuration }: StatsPanelProps) {
+  // Stats are derived on demand from the currently loaded graph rather than
+  // cached in App state because the computation is small and keeps this panel
+  // self-contained.
   const stats = getGraphStats(graph)
 
   const formatNumber = (num: number): string => {

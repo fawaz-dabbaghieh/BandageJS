@@ -26,6 +26,8 @@ export function convertGFAToGraph(
   gfaGraph: GFAGraph,
   name: string = 'Imported GFA',
 ): Graph {
+  // The app renders oriented nodes explicitly, so the converter expands each
+  // GFA segment into + / - strand-specific node ids as needed by the links.
   const nodes: GraphNode[] = []
   const edges: GraphEdge[] = []
 
@@ -90,7 +92,9 @@ export function convertGFAToGraph(
 
   // Process paths
   const paths: GraphPath[] = []
-  const edgeToPathsMap = new Map<string, Set<string>>() // Map edge key to set of path names
+  // Track which rendered edge belongs to which named paths so the canvas can
+  // overlay and filter path-specific connectors later.
+  const edgeToPathsMap = new Map<string, Set<string>>()
 
   for (const gfaPath of gfaGraph.paths) {
     // Parse path string (format: node1+,node2-,node3+,...)
@@ -123,6 +127,9 @@ export function convertGFAToGraph(
 
   // Add path information to edges
   for (const edge of edges) {
+    // The graph model stays edge-centric: each edge stores the path ids that
+    // traverse it so rendering can stay local while the full path list remains
+    // available for legends and selection UI.
     const edgeKey = `${edge.from}->${edge.to}`
     const pathIds = edgeToPathsMap.get(edgeKey)
     if (pathIds && pathIds.size > 0) {

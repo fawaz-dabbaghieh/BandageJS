@@ -9,6 +9,8 @@ export function GraphSelector({
   selectedGraph,
   onSelectGraph,
 }: GraphSelectorProps) {
+  // This selector is for the built-in sample graphs defined in exampleGraphs;
+  // loading real GFA files goes through the main App file menu instead.
   return (
     <div className="graph-selector">
       <label>

@@ -2,8 +2,8 @@ import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import { GraphCanvas } from './components/GraphCanvas'
 import { LengthDistribution } from './components/LengthDistribution'
 import { LayoutControls } from './components/LayoutControls'
-import { StatsPanel } from './components/StatsPanel'
 import { PathsLegend } from './components/PathsLegend'
+import { StatsPanel } from './components/StatsPanel'
 import { urlExamples } from './data/urlExamples'
 import { BandageLayoutWorker } from './utils/BandageLayoutWorker'
 import { parseGFA } from './utils/gfaParser'
@@ -52,6 +52,23 @@ function App({ worker }: AppProps) {
   const [drawLabels, setDrawLabels] = useState<boolean>(true)
   const [labelLengthThreshold, setLabelLengthThreshold] = useState<number>(0)
   const [drawPaths, setDrawPaths] = useState<boolean>(false)
+  // Keep path visibility in the React layer so toggling paths never requires
+  // recomputing the layout itself.
+  const [selectedPathNames, setSelectedPathNames] = useState<string[]>([])
+
+  // Drop any stale selections from a previous graph load and preserve the
+  // current graph's path ordering for the selector.
+  const visiblePathNames = useMemo(() => {
+    if (!currentGraph?.paths) return []
+
+    const availablePathNames = new Set(currentGraph.paths.map(path => path.name))
+    return selectedPathNames.filter(pathName => availablePathNames.has(pathName))
+  }, [currentGraph?.paths, selectedPathNames])
+
+  const visiblePathNameSet = useMemo(
+    () => new Set(visiblePathNames),
+    [visiblePathNames],
+  )
 
   // Handle loading GFA from text
   const loadGFAFromText = useCallback((text: string, filename: string) => {
@@ -169,6 +186,17 @@ function App({ worker }: AppProps) {
       }
     }
   }, [currentGraph, handleLoadURLExample])
+
+  useEffect(() => {
+    if (!currentGraph?.paths) {
+      setSelectedPathNames([])
+      return
+    }
+
+    // New graphs start with every path visible so the default behavior matches
+    // the original "draw all paths" view until the user filters it down.
+    setSelectedPathNames(currentGraph.paths.map(path => path.name))
+  }, [currentGraph])
 
   // Compute layout when graph or options change
   const computeLayout = useCallback(async () => {
@@ -440,14 +468,6 @@ function App({ worker }: AppProps) {
               </div>
             ) : layoutResult ? (
               <>
-                {drawPaths &&
-                  currentGraph?.paths &&
-                  currentGraph.paths.length > 0 && (
-                    <PathsLegend
-                      paths={currentGraph.paths}
-                      isDarkMode={isDarkMode}
-                    />
-                  )}
                 <GraphCanvas
                   layoutResult={layoutResult}
                   graph={currentGraph}
@@ -463,7 +483,32 @@ function App({ worker }: AppProps) {
                   drawLabels={drawLabels}
                   labelLengthThreshold={labelLengthThreshold}
                   drawPaths={drawPaths}
+                  visiblePathIds={visiblePathNameSet}
                 />
+                {/* Keep path selection close to the rendered graph so long path
+                    names and search results are easier to scan. */}
+                {drawPaths &&
+                  currentGraph?.paths &&
+                  currentGraph.paths.length > 0 && (
+                    <PathsLegend
+                      paths={currentGraph.paths}
+                      isDarkMode={isDarkMode}
+                      selectedPathNames={visiblePathNames}
+                      onTogglePath={pathName =>
+                        setSelectedPathNames(currentSelected =>
+                          currentSelected.includes(pathName)
+                            ? currentSelected.filter(name => name !== pathName)
+                            : [...currentSelected, pathName],
+                        )
+                      }
+                      onSelectAll={() =>
+                        setSelectedPathNames(
+                          currentGraph.paths?.map(path => path.name) ?? [],
+                        )
+                      }
+                      onDeselectAll={() => setSelectedPathNames([])}
+                    />
+                  )}
               </>
             ) : currentGraph ? (
               <div className="placeholder">

@@ -32,6 +32,9 @@ interface GraphCanvasProps {
   drawLabels?: boolean
   labelLengthThreshold?: number
   drawPaths?: boolean
+  // The selector hands the canvas the exact set of path IDs that should remain
+  // visible without changing the underlying graph model.
+  visiblePathIds?: Set<string>
   debugHitboxes?: boolean // Hidden flag to visualize edge hit areas
 }
 
@@ -50,6 +53,7 @@ export function GraphCanvas({
   drawLabels = true,
   labelLengthThreshold = 0,
   drawPaths = true,
+  visiblePathIds,
   debugHitboxes = false,
 }: GraphCanvasProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
@@ -173,6 +177,23 @@ export function GraphCanvas({
       return `hsl(${hue}, 70%, 50%)`
     },
     [graph.paths],
+  )
+
+  const getVisibleEdgePathIds = useCallback(
+    (pathIds?: string[]) => {
+      if (!drawPaths || !pathIds || pathIds.length === 0) {
+        return []
+      }
+
+      if (!visiblePathIds) {
+        return pathIds
+      }
+
+      // Use one shared filter for drawing, hit testing, and tooltips so every
+      // edge interaction reflects the same subset of visible paths.
+      return pathIds.filter(pathId => visiblePathIds.has(pathId))
+    },
+    [drawPaths, visiblePathIds],
   )
 
   // Color computation based on scheme
@@ -583,9 +604,12 @@ export function GraphCanvas({
     // Draw edges with path offsets
     graph.edges.forEach((edge, edgeIdx) => {
       const isHovered = hoveredEdge === edgeIdx
-      const numPaths = edge.pathIds?.length ?? 0
+      const visibleEdgePathIds = getVisibleEdgePathIds(edge.pathIds)
+      const numPaths = visibleEdgePathIds.length
 
       if (!drawPaths || numPaths === 0) {
+        // If all paths on this edge are filtered out, fall back to the base
+        // connector instead of hiding the underlying topology.
         // No paths or paths disabled - draw single edge with default color
         const edgeColor = isHovered ? '#aaa' : '#777'
         const lineWidth = isHovered
@@ -616,7 +640,7 @@ export function GraphCanvas({
         const offsetDist = 3 / scale // 3 pixels in screen space
 
         // Draw each path's edge with offset
-        edge.pathIds!.forEach((pathId, pathIdx) => {
+        visibleEdgePathIds.forEach((pathId, pathIdx) => {
           // Calculate offset position (spread evenly around center)
           const offset = (pathIdx - (numPaths - 1) / 2) * offsetDist
           const offsetX = perpX * offset
@@ -645,7 +669,8 @@ export function GraphCanvas({
         if (!fromEnd || !toStart) return
 
         const isSelfLoop = edge.from === edge.to
-        const numPaths = edge.pathIds?.length ?? 0
+        const visibleEdgePathIds = getVisibleEdgePathIds(edge.pathIds)
+        const numPaths = visibleEdgePathIds.length
 
         // Helper to draw hit area for edge with offset
         const drawHitArea = (offsetX: number, offsetY: number) => {
@@ -845,12 +870,14 @@ export function GraphCanvas({
     selectedNode,
     isDarkMode,
     getNodeColor,
+    getVisibleEdgePathIds,
     modifiedNodePositions,
     contigThickness,
     connectorThickness,
     drawLabels,
     labelLengthThreshold,
     drawPaths,
+    visiblePathIds,
   ])
 
   // Redraw when any state changes
@@ -1119,7 +1146,8 @@ export function GraphCanvas({
           if (!fromEnd || !toStart) continue
 
           const isSelfLoop = edge.from === edge.to
-          const numPaths = edge.pathIds?.length ?? 0
+          const visibleEdgePathIds = getVisibleEdgePathIds(edge.pathIds)
+          const numPaths = visibleEdgePathIds.length
 
           let dist: number
 
@@ -1588,6 +1616,11 @@ export function GraphCanvas({
         (() => {
           const edge = graph.edges[hoveredEdge]
           if (!edge) return null
+          // When path overlays are enabled, the tooltip mirrors the filtered
+          // set so the count matches what the user can currently see.
+          const visibleEdgePathIds = drawPaths
+            ? getVisibleEdgePathIds(edge.pathIds)
+            : edge.pathIds ?? []
 
           const fromNode = graph.nodes.find(n => n.id === edge.from)
           const toNode = graph.nodes.find(n => n.id === edge.to)
@@ -1631,9 +1664,15 @@ export function GraphCanvas({
                     }}
                   >
                     <div style={{ marginBottom: '3px', opacity: 0.9 }}>
-                      <strong>Paths ({edge.pathIds.length}):</strong>
+                      <strong>
+                        Paths ({visibleEdgePathIds.length}
+                        {visibleEdgePathIds.length !== edge.pathIds.length
+                          ? ` visible / ${edge.pathIds.length} total`
+                          : ''}
+                        ):
+                      </strong>
                     </div>
-                    {edge.pathIds.map((pathId, idx) => (
+                    {visibleEdgePathIds.map(pathId => (
                       <div
                         key={pathId}
                         style={{

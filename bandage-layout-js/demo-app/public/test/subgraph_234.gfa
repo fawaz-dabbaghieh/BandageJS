@@ -1,0 +1,12 @@
+H	VN:Z:1.1
+S	2	C
+S	3	G
+S	4	T
+L	2	+	3	+	0M
+L	3	+	4	+	0M
+L	4	-	3	-	0M
+L	3	-	2	-	0M
+L	2	+	2	-	0M
+P	loopbackP#subpath_1_3	2+,3+,4+	*
+P	loopbackP#subpath_7_9	4-,3-,2-	*
+P	loopbackP#test	2-,3-,4-	*

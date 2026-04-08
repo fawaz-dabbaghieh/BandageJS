@@ -45,6 +45,9 @@ export function LayoutControls({
   onDrawPathsChange,
   hasPathsInGraph,
 }: LayoutControlsProps) {
+  // The control panel is split into a "general" section for day-to-day viewing
+  // tweaks and an "advanced" section for layout parameters that can change the
+  // overall geometry more dramatically.
   const [generalExpanded, setGeneralExpanded] = useState(true)
   const [advancedExpanded, setAdvancedExpanded] = useState(false)
 

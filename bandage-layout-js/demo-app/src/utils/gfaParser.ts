@@ -38,6 +38,8 @@ export interface GFAGraph {
 }
 
 export function parseGFA(file: string): GFAGraph {
+  // The parser collects the small subset of GFA records the demo currently
+  // needs: headers, segments, links/edges, and paths.
   const graph: GFAGraph = {
     nodes: [],
     links: [],
@@ -56,6 +58,8 @@ export function parseGFA(file: string): GFAGraph {
       graph.header.push(headerLine)
     }
     if (line.startsWith('S')) {
+      // Segment lines differ between GFA1 and GFA2, so we normalize both
+      // formats into the same node structure here.
       const [, name, ...rest] = line.split('\t')
       let len = 0
       let seq = ''
@@ -80,6 +84,7 @@ export function parseGFA(file: string): GFAGraph {
       }
       graph.nodes.push({ id: name, length: len, sequence: seq, tags })
     } else if (line.startsWith('E')) {
+      // GFA2 edge lines store orientation directly in the endpoint strings.
       // eslint-disable-next-line unicorn/no-unreadable-array-destructuring
       const [, , source, target, , , , , cigar, ...rest] = line.split('\t')
       const source1 = source.slice(0, -1)
@@ -100,6 +105,7 @@ export function parseGFA(file: string): GFAGraph {
         tags,
       })
     } else if (line.startsWith('L')) {
+      // GFA1 link lines keep source/target names and orientations separate.
       const [, source, strand1, target, strand2, cigar, ...rest] =
         line.split('\t')
       const tags = {} as Record<string, string | number>
@@ -108,6 +114,8 @@ export function parseGFA(file: string): GFAGraph {
       }
       graph.links.push({ source, target, strand1, strand2, cigar, tags })
     } else if (line.startsWith('P')) {
+      // Paths are kept as raw ordered node strings here and converted later
+      // into the app's oriented node ids.
       const [, name, path, ...rest] = line.split('\t')
 
       graph.paths.push({ name, path, rest })

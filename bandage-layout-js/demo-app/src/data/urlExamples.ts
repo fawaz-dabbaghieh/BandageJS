@@ -4,7 +4,8 @@ export interface URLExample {
   url: string
 }
 
-// Relative URL for examples - use relative path for subdirectory deployments
+// Use relative URLs so the demo still works when hosted under a subdirectory
+// such as /demos/bandagejs/ instead of the site root.
 const BASE_URL = './test/'
 
 export const urlExamples: URLExample[] = [
