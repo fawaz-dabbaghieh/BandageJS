@@ -6,6 +6,9 @@ export interface GraphNode {
   name: string
   length: number
   depth: number
+  // Sequence is optional because mock/example graphs only model summary fields,
+  // while imported GFA segments can provide the full nucleotide string.
+  sequence?: string
 }
 
 export interface GraphEdge {
@@ -26,9 +29,9 @@ export interface Graph {
   description: string
   nodes: GraphNode[]
   edges: GraphEdge[]
-  // Paths correspond to GFA P-lines and are optional because not every graph
-  // carries embedded traversal information.
-  paths?: GraphPath[] // Optional paths from GFA P lines
+  // Paths can come from GFA P-lines or W-lines and are optional because not
+  // every graph carries embedded traversal information.
+  paths?: GraphPath[] // Optional paths/walks embedded in the source GFA
 }
 
 export interface LayoutOptions {

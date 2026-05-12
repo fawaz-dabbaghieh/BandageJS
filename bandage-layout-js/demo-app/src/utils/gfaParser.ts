@@ -39,7 +39,7 @@ export interface GFAGraph {
 
 export function parseGFA(file: string): GFAGraph {
   // The parser collects the small subset of GFA records the demo currently
-  // needs: headers, segments, links/edges, and paths.
+  // needs: headers, segments, links/edges, and paths/walks.
   const graph: GFAGraph = {
     nodes: [],
     links: [],
@@ -47,6 +47,7 @@ export function parseGFA(file: string): GFAGraph {
     header: [],
     id: '',
   }
+  const walkNameCounts = new Map<string, number>()
 
   for (const line of file.split('\n')) {
     if (line.startsWith('H')) {
@@ -117,6 +118,28 @@ export function parseGFA(file: string): GFAGraph {
       // Paths are kept as raw ordered node strings here and converted later
       // into the app's oriented node ids.
       const [, name, path, ...rest] = line.split('\t')
+
+      graph.paths.push({ name, path, rest })
+    } else if (line.startsWith('W')) {
+      const [, sampleName, haplotypeIndex, sequenceName, , , walk, ...rest] =
+        line.split('\t')
+
+      // Minimal W-line support: we currently use sample/haplotype/sequence to
+      // build a stable display name and parse the oriented walk itself. The
+      // other W fields (coordinates and tags) are intentionally ignored for
+      // now so we can add richer W metadata handling later.
+      const baseName = [sampleName, haplotypeIndex, sequenceName]
+        .filter(Boolean)
+        .join('#')
+      const priorOccurrences = walkNameCounts.get(baseName) ?? 0
+      walkNameCounts.set(baseName, priorOccurrences + 1)
+      const name =
+        priorOccurrences === 0 ? baseName : `${baseName} [${priorOccurrences + 1}]`
+      const path = Array.from(
+        walk.matchAll(/([<>])([^<>]+)/g),
+        ([, orientation, nodeName]) =>
+          `${nodeName}${orientation === '>' ? '+' : '-'}`,
+      ).join(',')
 
       graph.paths.push({ name, path, rest })
     }

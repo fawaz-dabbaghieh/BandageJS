@@ -38,6 +38,66 @@ interface GraphCanvasProps {
   debugHitboxes?: boolean // Hidden flag to visualize edge hit areas
 }
 
+const SEQUENCE_PREVIEW_CUTOFF = 100
+const SEQUENCE_PREVIEW_PREFIX_LENGTH = Math.ceil(SEQUENCE_PREVIEW_CUTOFF / 2)
+const SEQUENCE_PREVIEW_SUFFIX_LENGTH = Math.floor(SEQUENCE_PREVIEW_CUTOFF / 2)
+
+const IUPAC_COMPLEMENTS: Record<string, string> = {
+  A: 'T',
+  C: 'G',
+  G: 'C',
+  T: 'A',
+  U: 'A',
+  R: 'Y',
+  Y: 'R',
+  S: 'S',
+  W: 'W',
+  K: 'M',
+  M: 'K',
+  B: 'V',
+  D: 'H',
+  H: 'D',
+  V: 'B',
+  N: 'N',
+  a: 't',
+  c: 'g',
+  g: 'c',
+  t: 'a',
+  u: 'a',
+  r: 'y',
+  y: 'r',
+  s: 's',
+  w: 'w',
+  k: 'm',
+  m: 'k',
+  b: 'v',
+  d: 'h',
+  h: 'd',
+  v: 'b',
+  n: 'n',
+}
+
+function reverseComplement(sequence: string): string {
+  return [...sequence]
+    .reverse()
+    .map(base => IUPAC_COMPLEMENTS[base] ?? base)
+    .join('')
+}
+
+function getNodeSequence(node: GraphNode): string | null {
+  if (!node.sequence || node.sequence === '*') return null
+
+  // Nodes are rendered with explicit strand suffixes, so the details dialog
+  // should show the sequence in the same orientation the user clicked.
+  return node.id.endsWith('-') ? reverseComplement(node.sequence) : node.sequence
+}
+
+function formatSequencePreview(sequence: string): string {
+  if (sequence.length <= SEQUENCE_PREVIEW_CUTOFF) return sequence
+
+  return `${sequence.slice(0, SEQUENCE_PREVIEW_PREFIX_LENGTH)}.........${sequence.slice(-SEQUENCE_PREVIEW_SUFFIX_LENGTH)}`
+}
+
 export function GraphCanvas({
   layoutResult,
   graph,
@@ -1480,6 +1540,7 @@ export function GraphCanvas({
         (() => {
           const node = graph.nodes.find(n => n.id === detailsDialog.nodeId)
           if (!node) return null
+          const nodeSequence = getNodeSequence(node)
 
           return (
             <div
@@ -1561,6 +1622,22 @@ export function GraphCanvas({
                   <div>
                     <strong>Strand:</strong>{' '}
                     {node.id.endsWith('+') ? 'Positive (+)' : 'Negative (-)'}
+                  </div>
+                  <div>
+                    <strong>Sequence:</strong>{' '}
+                    {nodeSequence ? (
+                      <span
+                        style={{
+                          fontFamily:
+                            'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace',
+                          wordBreak: 'break-all',
+                        }}
+                      >
+                        {formatSequencePreview(nodeSequence)}
+                      </span>
+                    ) : (
+                      'Not available'
+                    )}
                   </div>
                 </div>
               </div>

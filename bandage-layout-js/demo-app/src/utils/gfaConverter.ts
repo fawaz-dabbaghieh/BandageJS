@@ -39,6 +39,15 @@ export function convertGFAToGraph(
     usedStrands.add(`${link.source}${sourceStrand}`)
     usedStrands.add(`${link.target}${targetStrand}`)
   }
+  for (const gfaPath of gfaGraph.paths) {
+    // Both P-lines and normalized W-lines use the same internal
+    // "node+,node-,..." representation here.
+    for (const segment of gfaPath.path.split(',')) {
+      if (segment) {
+        usedStrands.add(segment)
+      }
+    }
+  }
 
   // Convert nodes - only create strand versions that are actually used
   for (const gfaNode of gfaGraph.nodes) {
@@ -57,6 +66,7 @@ export function convertGFAToGraph(
         name: gfaNode.id,
         length: gfaNode.length,
         depth: typeof depth === 'number' ? depth : 1.0,
+        sequence: gfaNode.sequence,
       })
     }
 
@@ -67,6 +77,7 @@ export function convertGFAToGraph(
         name: gfaNode.id,
         length: gfaNode.length,
         depth: typeof depth === 'number' ? depth : 1.0,
+        sequence: gfaNode.sequence,
       })
     }
   }
