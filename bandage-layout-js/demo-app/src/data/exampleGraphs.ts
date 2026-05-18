@@ -1,6 +1,7 @@
 // Example assembly graphs with varied sequence lengths
 
 import type { Graph, GraphStats } from '../types'
+import { buildDisplayGraph, getDisplayNodes } from '../utils/displayGraph'
 
 export const exampleGraphs: Record<string, Graph> = {
   simple: {
@@ -131,13 +132,13 @@ export const exampleGraphs: Record<string, Graph> = {
   },
 }
 
-// Statistics are computed from the positive-strand nodes only so counts and
-// lengths describe the biological contigs rather than the doubled oriented
-// graph representation used for layout/rendering.
 export function getGraphStats(graph: Graph): GraphStats {
-  const uniqueNodes = graph.nodes.filter(n => n.id.endsWith('+'))
+  // Stats are derived from the same single-mode display abstraction as the
+  // canvas so counts stay correct even when only one orientation is present.
+  const uniqueNodes = getDisplayNodes(graph)
   const lengths = uniqueNodes.map(n => n.length).sort((a, b) => a - b)
   const depths = uniqueNodes.map(n => n.depth)
+  const displayGraph = buildDisplayGraph(graph, {})
 
   const totalLength = lengths.reduce((sum, l) => sum + l, 0)
   const minLength = lengths[0]!
@@ -151,7 +152,7 @@ export function getGraphStats(graph: Graph): GraphStats {
 
   return {
     nodeCount: uniqueNodes.length,
-    edgeCount: graph.edges.length / 2,
+    edgeCount: displayGraph.edges.length,
     totalLength,
     minLength,
     maxLength,

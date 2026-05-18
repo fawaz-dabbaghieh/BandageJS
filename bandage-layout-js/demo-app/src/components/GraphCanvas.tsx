@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, useCallback } from 'react'
+import { useEffect, useRef, useState, useCallback, useMemo } from 'react'
 import {
   useFloating,
   offset,
@@ -15,6 +15,11 @@ import type {
   GraphNode,
   ColorScheme,
 } from '../types'
+import {
+  buildDisplayGraph,
+  resolveDisplaySegments,
+  stripNodeOrientation,
+} from '../utils/displayGraph'
 import { clampZoom } from '../utils/zoom'
 
 interface GraphCanvasProps {
@@ -42,54 +47,13 @@ const SEQUENCE_PREVIEW_CUTOFF = 100
 const SEQUENCE_PREVIEW_PREFIX_LENGTH = Math.ceil(SEQUENCE_PREVIEW_CUTOFF / 2)
 const SEQUENCE_PREVIEW_SUFFIX_LENGTH = Math.floor(SEQUENCE_PREVIEW_CUTOFF / 2)
 
-const IUPAC_COMPLEMENTS: Record<string, string> = {
-  A: 'T',
-  C: 'G',
-  G: 'C',
-  T: 'A',
-  U: 'A',
-  R: 'Y',
-  Y: 'R',
-  S: 'S',
-  W: 'W',
-  K: 'M',
-  M: 'K',
-  B: 'V',
-  D: 'H',
-  H: 'D',
-  V: 'B',
-  N: 'N',
-  a: 't',
-  c: 'g',
-  g: 'c',
-  t: 'a',
-  u: 'a',
-  r: 'y',
-  y: 'r',
-  s: 's',
-  w: 'w',
-  k: 'm',
-  m: 'k',
-  b: 'v',
-  d: 'h',
-  h: 'd',
-  v: 'b',
-  n: 'n',
-}
-
-function reverseComplement(sequence: string): string {
-  return [...sequence]
-    .reverse()
-    .map(base => IUPAC_COMPLEMENTS[base] ?? base)
-    .join('')
-}
-
 function getNodeSequence(node: GraphNode): string | null {
   if (!node.sequence || node.sequence === '*') return null
 
-  // Nodes are rendered with explicit strand suffixes, so the details dialog
-  // should show the sequence in the same orientation the user clicked.
-  return node.id.endsWith('-') ? reverseComplement(node.sequence) : node.sequence
+  // The single-mode display treats the contig itself as the primary entity, so
+  // the details dialog shows the stored segment sequence rather than a strand-
+  // specific reverse complement of whichever internal node was displayed.
+  return node.sequence
 }
 
 function formatSequencePreview(sequence: string): string {
@@ -151,6 +115,14 @@ export function GraphCanvas({
     visible: false,
     nodeId: null,
   })
+  const activeNodePositions = useMemo(
+    () => modifiedNodePositions || layoutResult.nodePositions,
+    [layoutResult.nodePositions, modifiedNodePositions],
+  )
+  const displayGraph = useMemo(
+    () => buildDisplayGraph(graph, activeNodePositions),
+    [graph, activeNodePositions],
+  )
   const boundsRef = useRef<{
     minX: number
     maxX: number
@@ -239,19 +211,22 @@ export function GraphCanvas({
     [graph.paths],
   )
 
-  const getVisibleEdgePathIds = useCallback(
-    (pathIds?: string[]) => {
-      if (!drawPaths || !pathIds || pathIds.length === 0) {
+  const getVisiblePathTraversals = useCallback(
+    (pathTraversals: typeof displayGraph.edges[number]['pathTraversals']) => {
+      if (!drawPaths || pathTraversals.length === 0) {
         return []
       }
 
       if (!visiblePathIds) {
-        return pathIds
+        return pathTraversals
       }
 
-      // Use one shared filter for drawing, hit testing, and tooltips so every
-      // edge interaction reflects the same subset of visible paths.
-      return pathIds.filter(pathId => visiblePathIds.has(pathId))
+      // The single-mode display groups reverse-complement edges together, so
+      // path filtering must operate on the grouped traversal list rather than
+      // the old per-oriented-edge pathIds array.
+      return pathTraversals.filter(traversal =>
+        visiblePathIds.has(traversal.pathId),
+      )
     },
     [drawPaths, visiblePathIds],
   )
@@ -383,6 +358,199 @@ export function GraphCanvas({
     [colorScheme, isDarkMode, graph],
   )
 
+  const getDisplayNodeSegments = useCallback(
+    (nodeId: string) => resolveDisplaySegments(nodeId, displayGraph),
+    [displayGraph],
+  )
+
+  const getEdgeOffset = useCallback(
+    (pathIdx: number, numPaths: number, scale: number) => {
+      const offsetDist = 3 / scale
+      return (pathIdx - (numPaths - 1) / 2) * offsetDist
+    },
+    [],
+  )
+
+  const buildEdgeGeometry = useCallback(
+    (edge: Graph['edges'][number], offsetX: number, offsetY: number, scale: number) => {
+      const fromSegments = getDisplayNodeSegments(edge.from)
+      const toSegments = getDisplayNodeSegments(edge.to)
+
+      if (!fromSegments || !toSegments || fromSegments.length === 0 || toSegments.length === 0) {
+        return null
+      }
+
+      const fromEnd = fromSegments[fromSegments.length - 1]
+      const toStart = toSegments[0]
+      if (!fromEnd || !toStart) return null
+
+      const fromBase = stripNodeOrientation(edge.from)
+      const toBase = stripNodeOrientation(edge.to)
+      const isSelfLoop = edge.from === edge.to
+      const isReverseComplementLoop = fromBase === toBase && edge.from !== edge.to
+
+      let segmentDirX = 1
+      let segmentDirY = 0
+      if (fromSegments.length >= 2) {
+        const prevSeg = fromSegments[fromSegments.length - 2]!
+        const dx = fromEnd.x - prevSeg.x
+        const dy = fromEnd.y - prevSeg.y
+        const len = Math.hypot(dx, dy)
+        if (len > 0) {
+          segmentDirX = dx / len
+          segmentDirY = dy / len
+        }
+      }
+
+      if (isSelfLoop) {
+        const extensionLength = 50 / scale
+        const cp1x = fromEnd.x + offsetX + segmentDirX * extensionLength
+        const cp1y = fromEnd.y + offsetY + segmentDirY * extensionLength
+        const cp2x = toStart.x + offsetX - segmentDirX * extensionLength
+        const cp2y = toStart.y + offsetY - segmentDirY * extensionLength
+
+        const perpX = -segmentDirY
+        const perpY = segmentDirX
+        const perpShift = extensionLength
+
+        const nodeMidX = (fromEnd.x + toStart.x) / 2 + offsetX
+        const nodeMidY = (fromEnd.y + toStart.y) / 2 + offsetY
+
+        return {
+          kind: 'self-loop' as const,
+          start: { x: fromEnd.x + offsetX, y: fromEnd.y + offsetY },
+          end: { x: toStart.x + offsetX, y: toStart.y + offsetY },
+          controlPoint1: { x: cp1x, y: cp1y },
+          controlPoint2: { x: cp2x, y: cp2y },
+          cp1Shifted: {
+            x: cp1x + perpX * perpShift,
+            y: cp1y + perpY * perpShift,
+          },
+          nodeMidShifted: {
+            x: nodeMidX + perpX * perpShift,
+            y: nodeMidY + perpY * perpShift,
+          },
+          cp2Shifted: {
+            x: cp2x + perpX * perpShift,
+            y: cp2y + perpY * perpShift,
+          },
+        }
+      }
+
+      if (isReverseComplementLoop) {
+        const startX = fromEnd.x + offsetX
+        const startY = fromEnd.y + offsetY
+        const extensionLength = 25 / scale
+        const cpX = startX + segmentDirX * extensionLength
+        const cpY = startY + segmentDirY * extensionLength
+        const pathMidX = startX + (cpX - startX) * 3
+        const pathMidY = startY + (cpY - startY) * 3
+        const perpX = -segmentDirY
+        const perpY = segmentDirX
+        const perpendicularShift = extensionLength * 1.5
+
+        return {
+          kind: 'reverse-complement-loop' as const,
+          start: { x: startX, y: startY },
+          end: { x: startX, y: startY },
+          controlPoint1: { x: cpX, y: cpY },
+          controlPoint2: { x: cpX, y: cpY },
+          pathMidPoint: { x: pathMidX, y: pathMidY },
+          pathMidShifted: {
+            x: pathMidX + perpX * perpendicularShift,
+            y: pathMidY + perpY * perpendicularShift,
+          },
+          pathMidShiftedOpposite: {
+            x: pathMidX - perpX * perpendicularShift,
+            y: pathMidY - perpY * perpendicularShift,
+          },
+        }
+      }
+
+      let fromPrev = fromSegments[fromSegments.length - 2]
+      if (!fromPrev) {
+        fromPrev = fromSegments[0]
+      }
+
+      let toNext = toSegments[1]
+      if (!toNext) {
+        toNext = toSegments[0]
+      }
+
+      const distance = Math.hypot(toStart.x - fromEnd.x, toStart.y - fromEnd.y)
+      const projectionDistance = Math.min(distance * 0.5, 80 / scale)
+
+      const projectLine = (
+        x1: number,
+        y1: number,
+        x2: number,
+        y2: number,
+        distance: number,
+      ): [number, number] => {
+        const d = Math.hypot(y2 - y1, x2 - x1)
+        if (d === 0) return [x2, y2]
+        const vx = (x2 - x1) / d
+        const vy = (y2 - y1) / d
+        return [x2 + distance * vx, y2 + distance * vy]
+      }
+
+      const [cp1x, cp1y] = projectLine(
+        fromPrev.x,
+        fromPrev.y,
+        fromEnd.x,
+        fromEnd.y,
+        projectionDistance,
+      )
+      const [cp2x, cp2y] = projectLine(
+        toNext.x,
+        toNext.y,
+        toStart.x,
+        toStart.y,
+        projectionDistance,
+      )
+
+      return {
+        kind: 'regular' as const,
+        start: { x: fromEnd.x + offsetX, y: fromEnd.y + offsetY },
+        end: { x: toStart.x + offsetX, y: toStart.y + offsetY },
+        controlPoint1: { x: cp1x + offsetX, y: cp1y + offsetY },
+        controlPoint2: { x: cp2x + offsetX, y: cp2y + offsetY },
+      }
+    },
+    [getDisplayNodeSegments],
+  )
+
+  const getEdgeOffsetNormal = useCallback((edge: Graph['edges'][number]) => {
+    const fromSegments = getDisplayNodeSegments(edge.from)
+    const toSegments = getDisplayNodeSegments(edge.to)
+
+    if (!fromSegments || !toSegments || fromSegments.length === 0 || toSegments.length === 0) {
+      return null
+    }
+
+    const fromEnd = fromSegments[fromSegments.length - 1]
+    const toStart = toSegments[0]
+    if (!fromEnd || !toStart) return null
+
+    let dx = toStart.x - fromEnd.x
+    let dy = toStart.y - fromEnd.y
+    let len = Math.hypot(dx, dy)
+
+    if (len === 0 && fromSegments.length >= 2) {
+      const prevSeg = fromSegments[fromSegments.length - 2]!
+      dx = fromEnd.x - prevSeg.x
+      dy = fromEnd.y - prevSeg.y
+      len = Math.hypot(dx, dy)
+    }
+
+    if (len === 0) return null
+
+    return {
+      x: -dy / len,
+      y: dx / len,
+    }
+  }, [getDisplayNodeSegments])
+
   // Drawing function
   const draw = useCallback(() => {
     if (!layoutResult || !canvasRef.current || !boundsRef.current) return
@@ -403,8 +571,6 @@ export function GraphCanvas({
     ctx.fillStyle = isDarkMode ? '#1a1a1a' : '#ffffff'
     ctx.fillRect(0, 0, width, height)
 
-    // Use modified positions if available, otherwise use layout result
-    const nodePositions = modifiedNodePositions || layoutResult.nodePositions
     const { scale, translateX, translateY } = transform
 
     // Helper to transform coordinates
@@ -412,21 +578,6 @@ export function GraphCanvas({
       x: x * scale + translateX,
       y: y * scale + translateY,
     })
-
-    // Helper function to project a point forward from a line segment
-    const projectLine = (
-      x1: number,
-      y1: number,
-      x2: number,
-      y2: number,
-      distance: number,
-    ): [number, number] => {
-      const d = Math.hypot(y2 - y1, x2 - x1)
-      if (d === 0) return [x2, y2]
-      const vx = (x2 - x1) / d
-      const vy = (y2 - y1) / d
-      return [x2 + distance * vx, y2 + distance * vy]
-    }
 
     // Helper function to draw an arrowhead at a point
     const drawArrowhead = (
@@ -450,121 +601,72 @@ export function GraphCanvas({
       ctx.restore()
     }
 
-    // Helper function to draw a single edge with offset
+    const addAlphaToColor = (color: string, alpha: number): string => {
+      if (color.startsWith('#')) {
+        const alphaHex = Math.round(alpha * 255)
+          .toString(16)
+          .padStart(2, '0')
+        if (color.length === 4) {
+          const r = color[1]
+          const g = color[2]
+          const b = color[3]
+          return `#${r}${r}${g}${g}${b}${b}${alphaHex}`
+        }
+        return `${color}${alphaHex}`
+      }
+
+      if (color.startsWith('rgb(')) {
+        return color.replace('rgb(', 'rgba(').replace(')', `, ${alpha})`)
+      }
+
+      if (color.startsWith('hsl(')) {
+        return color.replace('hsl(', 'hsla(').replace(')', `, ${alpha})`)
+      }
+
+      return color
+    }
+
+    // Base graph edges are drawn without arrowheads, but path traversals still
+    // keep them so directionality is visible only in the path overlay layer.
     const drawEdge = (
       edge: (typeof graph.edges)[0],
       offsetX: number,
       offsetY: number,
       color: string,
       lineWidth: number,
+      showArrowhead: boolean,
     ) => {
-      const fromSegments = nodePositions[edge.from]
-      const toSegments = nodePositions[edge.to]
+      const geometry = buildEdgeGeometry(edge, offsetX, offsetY, scale)
+      if (!geometry) return
 
-      if (!fromSegments || !toSegments) return
-
-      const fromEnd = fromSegments[fromSegments.length - 1]
-      const toStart = toSegments[0]
-
-      if (!fromEnd || !toStart) return
-
-      // Helper to convert color to rgba with transparency
-      const addAlphaToColor = (color: string, alpha: number): string => {
-        if (color.startsWith('#')) {
-          // Handle hex colors - convert to 8-char format (#rrggbbaa)
-          const alphaHex = Math.round(alpha * 255)
-            .toString(16)
-            .padStart(2, '0')
-          if (color.length === 4) {
-            // #rgb -> #rrggbbaa
-            const r = color[1]
-            const g = color[2]
-            const b = color[3]
-            return `#${r}${r}${g}${g}${b}${b}${alphaHex}`
-          } else {
-            // #rrggbb -> #rrggbbaa
-            return `${color}${alphaHex}`
-          }
-        } else if (color.startsWith('rgb(')) {
-          return color.replace('rgb(', 'rgba(').replace(')', `, ${alpha})`)
-        } else if (color.startsWith('hsl(')) {
-          return color.replace('hsl(', 'hsla(').replace(')', `, ${alpha})`)
-        } else {
-          return color
-        }
-      }
-
-      // Use slight transparency for lines
       ctx.strokeStyle = addAlphaToColor(color, 0.85)
       ctx.lineWidth = lineWidth
+      const strokeColor = addAlphaToColor(color, 0.85)
 
-      // Check if this is a self-loop (node connecting to itself)
-      const isSelfLoop = edge.from === edge.to
-
-      // Apply offset to all coordinates
-      const p1 = transformPoint(fromEnd.x + offsetX, fromEnd.y + offsetY)
-      const p2 = transformPoint(toStart.x + offsetX, toStart.y + offsetY)
-
-      if (isSelfLoop) {
-        // Use Bandage's approach for self-loops:
-        // - Get the last segment of the node to determine direction
-        // - Extend it forward to create control points
-        // - Calculate perpendicular shift using normal vector
-        // - Create two cubic bezier curves forming the loop
-
-        const startLocation = { x: p1.x, y: p1.y }
-        const endLocation = { x: p2.x, y: p2.y }
-
-        // Get the direction of the last segment of the node
-        let segmentDirX = 1,
-          segmentDirY = 0
-        if (fromSegments.length >= 2) {
-          const prevSeg = fromSegments[fromSegments.length - 2]!
-          const lastSeg = fromSegments[fromSegments.length - 1]!
-          const dx = lastSeg.x - prevSeg.x
-          const dy = lastSeg.y - prevSeg.y
-          const len = Math.hypot(dx, dy)
-          if (len > 0) {
-            segmentDirX = dx / len
-            segmentDirY = dy / len
-          }
-        }
-
-        // Extension length for control points (in graph coordinates)
-        const extensionLength = 50 / scale
-
-        // Control points extended along the node direction (with offset)
-        const cp1x = fromEnd.x + offsetX + segmentDirX * extensionLength
-        const cp1y = fromEnd.y + offsetY + segmentDirY * extensionLength
-        const cp2x = toStart.x + offsetX - segmentDirX * extensionLength
-        const cp2y = toStart.y + offsetY - segmentDirY * extensionLength
-
-        // Perpendicular shift (normal vector)
-        const perpX = -segmentDirY
-        const perpY = segmentDirX
-        const perpShift = extensionLength
-
-        // Node midpoint in graph coordinates (with offset)
-        const nodeMidX = (fromEnd.x + toStart.x) / 2 + offsetX
-        const nodeMidY = (fromEnd.y + toStart.y) / 2 + offsetY
-
-        // Transform all points to screen space
-        const controlPoint1 = transformPoint(cp1x, cp1y)
-        const controlPoint2 = transformPoint(cp2x, cp2y)
+      if (geometry.kind === 'self-loop') {
+        const startLocation = transformPoint(geometry.start.x, geometry.start.y)
+        const endLocation = transformPoint(geometry.end.x, geometry.end.y)
+        const controlPoint1 = transformPoint(
+          geometry.controlPoint1.x,
+          geometry.controlPoint1.y,
+        )
+        const controlPoint2 = transformPoint(
+          geometry.controlPoint2.x,
+          geometry.controlPoint2.y,
+        )
         const cp1Shifted = transformPoint(
-          cp1x + perpX * perpShift,
-          cp1y + perpY * perpShift,
+          geometry.cp1Shifted.x,
+          geometry.cp1Shifted.y,
         )
         const nodeMidShifted = transformPoint(
-          nodeMidX + perpX * perpShift,
-          nodeMidY + perpY * perpShift,
+          geometry.nodeMidShifted.x,
+          geometry.nodeMidShifted.y,
         )
         const cp2Shifted = transformPoint(
-          cp2x + perpX * perpShift,
-          cp2y + perpY * perpShift,
+          geometry.cp2Shifted.x,
+          geometry.cp2Shifted.y,
         )
 
-        // Draw the loop as two cubic bezier curves
         ctx.beginPath()
         ctx.moveTo(startLocation.x, startLocation.y)
         ctx.bezierCurveTo(
@@ -585,69 +687,85 @@ export function GraphCanvas({
         )
         ctx.stroke()
 
-        // Draw arrowhead at the end of the self-loop
-        const angle = Math.atan2(
-          endLocation.y - controlPoint2.y,
-          endLocation.x - controlPoint2.x,
+        if (showArrowhead) {
+          const angle = Math.atan2(
+            endLocation.y - controlPoint2.y,
+            endLocation.x - controlPoint2.x,
+          )
+          drawArrowhead(ctx, endLocation.x, endLocation.y, angle, strokeColor)
+        }
+      } else if (geometry.kind === 'reverse-complement-loop') {
+        const startLocation = transformPoint(geometry.start.x, geometry.start.y)
+        const endLocation = transformPoint(geometry.end.x, geometry.end.y)
+        const controlPoint1 = transformPoint(
+          geometry.controlPoint1.x,
+          geometry.controlPoint1.y,
         )
-        drawArrowhead(
-          ctx,
+        const controlPoint2 = transformPoint(
+          geometry.controlPoint2.x,
+          geometry.controlPoint2.y,
+        )
+        const pathMidPoint = transformPoint(
+          geometry.pathMidPoint.x,
+          geometry.pathMidPoint.y,
+        )
+        const pathMidShifted = transformPoint(
+          geometry.pathMidShifted.x,
+          geometry.pathMidShifted.y,
+        )
+        const pathMidShiftedOpposite = transformPoint(
+          geometry.pathMidShiftedOpposite.x,
+          geometry.pathMidShiftedOpposite.y,
+        )
+
+        ctx.beginPath()
+        ctx.moveTo(startLocation.x, startLocation.y)
+        ctx.bezierCurveTo(
+          controlPoint1.x,
+          controlPoint1.y,
+          pathMidShifted.x,
+          pathMidShifted.y,
+          pathMidPoint.x,
+          pathMidPoint.y,
+        )
+        ctx.bezierCurveTo(
+          pathMidShiftedOpposite.x,
+          pathMidShiftedOpposite.y,
+          controlPoint2.x,
+          controlPoint2.y,
           endLocation.x,
           endLocation.y,
-          angle,
-          addAlphaToColor(color, 0.85),
         )
+        ctx.stroke()
+
+        if (showArrowhead) {
+          const angle = Math.atan2(
+            endLocation.y - pathMidShiftedOpposite.y,
+            endLocation.x - pathMidShiftedOpposite.x,
+          )
+          drawArrowhead(ctx, endLocation.x, endLocation.y, angle, strokeColor)
+        }
       } else {
-        // Regular edge between different nodes
-        // Get trajectory vectors from the node segments
-        // For source node: use last two segments to determine exit direction
-        let fromPrev = fromSegments[fromSegments.length - 2]
-        if (!fromPrev && fromSegments.length > 0) {
-          fromPrev = fromSegments[0]
-        }
-
-        // For target node: use first two segments to determine entry direction
-        let toNext = toSegments[1]
-        if (!toNext && toSegments.length > 0) {
-          toNext = toSegments[0]
-        }
-
-        // Calculate control points by projecting forward along node trajectories
-        const projectionDistance = Math.min(
-          Math.hypot(p2.x - p1.x, p2.y - p1.y) * 0.5,
-          80,
+        const p1 = transformPoint(geometry.start.x, geometry.start.y)
+        const p2 = transformPoint(geometry.end.x, geometry.end.y)
+        const cp1 = transformPoint(
+          geometry.controlPoint1.x,
+          geometry.controlPoint1.y,
+        )
+        const cp2 = transformPoint(
+          geometry.controlPoint2.x,
+          geometry.controlPoint2.y,
         )
 
-        // Project from source node end, following its trajectory
-        const [cx1, cy1] = projectLine(
-          fromPrev.x,
-          fromPrev.y,
-          fromEnd.x,
-          fromEnd.y,
-          projectionDistance / scale,
-        )
-        const cp1 = transformPoint(cx1 + offsetX, cy1 + offsetY)
-
-        // Project from target node start, following its trajectory backwards
-        const [cx2, cy2] = projectLine(
-          toNext.x,
-          toNext.y,
-          toStart.x,
-          toStart.y,
-          projectionDistance / scale,
-        )
-        const cp2 = transformPoint(cx2 + offsetX, cy2 + offsetY)
-
-        // Draw cubic bezier curve
         ctx.beginPath()
         ctx.moveTo(p1.x, p1.y)
         ctx.bezierCurveTo(cp1.x, cp1.y, cp2.x, cp2.y, p2.x, p2.y)
         ctx.stroke()
 
-        // Draw arrowhead at the end point
-        // Calculate angle from control point 2 to end point
-        const angle = Math.atan2(p2.y - cp2.y, p2.x - cp2.x)
-        drawArrowhead(ctx, p2.x, p2.y, angle, addAlphaToColor(color, 0.85))
+        if (showArrowhead) {
+          const angle = Math.atan2(p2.y - cp2.y, p2.x - cp2.x)
+          drawArrowhead(ctx, p2.x, p2.y, angle, strokeColor)
+        }
       }
     }
 
@@ -661,56 +779,48 @@ export function GraphCanvas({
       })
     }
 
-    // Draw edges with path offsets
-    graph.edges.forEach((edge, edgeIdx) => {
+    // Draw single-mode base edges and then directional path overlays on top of
+    // the same canonical geometry.
+    displayGraph.edges.forEach((displayEdge, edgeIdx) => {
       const isHovered = hoveredEdge === edgeIdx
-      const visibleEdgePathIds = getVisibleEdgePathIds(edge.pathIds)
-      const numPaths = visibleEdgePathIds.length
+      const visiblePathTraversals = getVisiblePathTraversals(
+        displayEdge.pathTraversals,
+      )
+      const numPaths = visiblePathTraversals.length
 
       if (!drawPaths || numPaths === 0) {
-        // If all paths on this edge are filtered out, fall back to the base
-        // connector instead of hiding the underlying topology.
-        // No paths or paths disabled - draw single edge with default color
         const edgeColor = isHovered ? '#aaa' : '#777'
         const lineWidth = isHovered
           ? connectorThickness + 1
           : connectorThickness
-        drawEdge(edge, 0, 0, edgeColor, lineWidth)
+        drawEdge(
+          displayEdge.representativeEdge,
+          0,
+          0,
+          edgeColor,
+          lineWidth,
+          false,
+        )
       } else {
-        // Multiple paths - draw offset edges for each path
-        const fromSegments = nodePositions[edge.from]
-        const toSegments = nodePositions[edge.to]
-        if (!fromSegments || !toSegments) return
+        const offsetNormal = getEdgeOffsetNormal(displayEdge.representativeEdge)
 
-        const fromEnd = fromSegments[fromSegments.length - 1]
-        const toStart = toSegments[0]
-        if (!fromEnd || !toStart) return
-
-        // Calculate perpendicular offset direction
-        const dx = toStart.x - fromEnd.x
-        const dy = toStart.y - fromEnd.y
-        const len = Math.hypot(dx, dy)
-        if (len === 0) return
-
-        // Perpendicular vector (rotated 90 degrees)
-        const perpX = -dy / len
-        const perpY = dx / len
-
-        // Offset distance in graph coordinates
-        const offsetDist = 3 / scale // 3 pixels in screen space
-
-        // Draw each path's edge with offset
-        visibleEdgePathIds.forEach((pathId, pathIdx) => {
-          // Calculate offset position (spread evenly around center)
-          const offset = (pathIdx - (numPaths - 1) / 2) * offsetDist
-          const offsetX = perpX * offset
-          const offsetY = perpY * offset
-
-          const color = pathColors.get(pathId) ?? '#888'
+        visiblePathTraversals.forEach((traversal, pathIdx) => {
+          const offset = getEdgeOffset(pathIdx, numPaths, scale)
+          const offsetX = (offsetNormal?.x ?? 0) * offset
+          const offsetY = (offsetNormal?.y ?? 0) * offset
+          const color = pathColors.get(traversal.pathId) ?? '#888'
           const lineWidth = isHovered
             ? connectorThickness + 1
             : connectorThickness
-          drawEdge(edge, offsetX, offsetY, color, lineWidth)
+
+          drawEdge(
+            traversal.edge,
+            offsetX,
+            offsetY,
+            color,
+            lineWidth,
+            true,
+          )
         })
       }
     })
@@ -719,166 +829,127 @@ export function GraphCanvas({
     if (debugHitboxes) {
       const edgeThreshold = 10 / scale
 
-      graph.edges.forEach((edge, edgeIdx) => {
-        const fromSegments = nodePositions[edge.from]
-        const toSegments = nodePositions[edge.to]
-        if (!fromSegments || !toSegments) return
-
-        const fromEnd = fromSegments[fromSegments.length - 1]
-        const toStart = toSegments[0]
-        if (!fromEnd || !toStart) return
-
-        const isSelfLoop = edge.from === edge.to
-        const visibleEdgePathIds = getVisibleEdgePathIds(edge.pathIds)
-        const numPaths = visibleEdgePathIds.length
+      displayGraph.edges.forEach(displayEdge => {
+        const visiblePathTraversals = getVisiblePathTraversals(
+          displayEdge.pathTraversals,
+        )
+        const numPaths = visiblePathTraversals.length
 
         // Helper to draw hit area for edge with offset
-        const drawHitArea = (offsetX: number, offsetY: number) => {
-          if (isSelfLoop) {
-            // Self-loop hit area
-            let segmentDirX = 1,
-              segmentDirY = 0
-            if (fromSegments.length >= 2) {
-              const prevSeg = fromSegments[fromSegments.length - 2]!
-              const lastSeg = fromSegments[fromSegments.length - 1]!
-              const dx = lastSeg.x - prevSeg.x
-              const dy = lastSeg.y - prevSeg.y
-              const len = Math.hypot(dx, dy)
-              if (len > 0) {
-                segmentDirX = dx / len
-                segmentDirY = dy / len
-              }
-            }
+        const drawHitArea = (
+          edge: (typeof graph.edges)[0],
+          offsetX: number,
+          offsetY: number,
+        ) => {
+          const geometry = buildEdgeGeometry(edge, offsetX, offsetY, scale)
+          if (!geometry) return
 
-            const extensionLength = 50 / scale
-            const cp1x = fromEnd.x + offsetX + segmentDirX * extensionLength
-            const cp1y = fromEnd.y + offsetY + segmentDirY * extensionLength
-            const cp2x = toStart.x + offsetX - segmentDirX * extensionLength
-            const cp2y = toStart.y + offsetY - segmentDirY * extensionLength
+          ctx.strokeStyle = 'rgba(255, 105, 180, 0.3)'
+          ctx.lineWidth = edgeThreshold * scale
+          ctx.beginPath()
 
-            const perpX = -segmentDirY
-            const perpY = segmentDirX
-            const perpShift = extensionLength
-
-            const nodeMidX = (fromEnd.x + toStart.x) / 2 + offsetX
-            const nodeMidY = (fromEnd.y + toStart.y) / 2 + offsetY
-
-            const cp1ShiftedX = cp1x + perpX * perpShift
-            const cp1ShiftedY = cp1y + perpY * perpShift
-            const nodeMidShiftedX = nodeMidX + perpX * perpShift
-            const nodeMidShiftedY = nodeMidY + perpY * perpShift
-            const cp2ShiftedX = cp2x + perpX * perpShift
-            const cp2ShiftedY = cp2y + perpY * perpShift
-
-            const p1 = transformPoint(fromEnd.x + offsetX, fromEnd.y + offsetY)
-            const cp1 = transformPoint(cp1x, cp1y)
-            const cp1s = transformPoint(cp1ShiftedX, cp1ShiftedY)
-            const mid = transformPoint(nodeMidShiftedX, nodeMidShiftedY)
-            const cp2s = transformPoint(cp2ShiftedX, cp2ShiftedY)
-            const cp2 = transformPoint(cp2x, cp2y)
-            const p2 = transformPoint(toStart.x + offsetX, toStart.y + offsetY)
-
-            ctx.strokeStyle = 'rgba(255, 105, 180, 0.3)'
-            ctx.lineWidth = edgeThreshold * scale
-            ctx.beginPath()
+          if (geometry.kind === 'self-loop') {
+            const p1 = transformPoint(geometry.start.x, geometry.start.y)
+            const cp1 = transformPoint(
+              geometry.controlPoint1.x,
+              geometry.controlPoint1.y,
+            )
+            const cp1s = transformPoint(
+              geometry.cp1Shifted.x,
+              geometry.cp1Shifted.y,
+            )
+            const mid = transformPoint(
+              geometry.nodeMidShifted.x,
+              geometry.nodeMidShifted.y,
+            )
+            const cp2s = transformPoint(
+              geometry.cp2Shifted.x,
+              geometry.cp2Shifted.y,
+            )
+            const cp2 = transformPoint(
+              geometry.controlPoint2.x,
+              geometry.controlPoint2.y,
+            )
+            const p2 = transformPoint(geometry.end.x, geometry.end.y)
             ctx.moveTo(p1.x, p1.y)
             ctx.bezierCurveTo(cp1.x, cp1.y, cp1s.x, cp1s.y, mid.x, mid.y)
             ctx.bezierCurveTo(cp2s.x, cp2s.y, cp2.x, cp2.y, p2.x, p2.y)
-            ctx.stroke()
+          } else if (geometry.kind === 'reverse-complement-loop') {
+            const p1 = transformPoint(geometry.start.x, geometry.start.y)
+            const cp1 = transformPoint(
+              geometry.controlPoint1.x,
+              geometry.controlPoint1.y,
+            )
+            const cp2 = transformPoint(
+              geometry.controlPoint2.x,
+              geometry.controlPoint2.y,
+            )
+            const mid = transformPoint(
+              geometry.pathMidPoint.x,
+              geometry.pathMidPoint.y,
+            )
+            const mids = transformPoint(
+              geometry.pathMidShifted.x,
+              geometry.pathMidShifted.y,
+            )
+            const midsOpposite = transformPoint(
+              geometry.pathMidShiftedOpposite.x,
+              geometry.pathMidShiftedOpposite.y,
+            )
+            const p2 = transformPoint(geometry.end.x, geometry.end.y)
+            ctx.moveTo(p1.x, p1.y)
+            ctx.bezierCurveTo(cp1.x, cp1.y, mids.x, mids.y, mid.x, mid.y)
+            ctx.bezierCurveTo(
+              midsOpposite.x,
+              midsOpposite.y,
+              cp2.x,
+              cp2.y,
+              p2.x,
+              p2.y,
+            )
           } else {
-            // Regular edge hit area
-            let fromPrev = fromSegments[fromSegments.length - 2]
-            if (!fromPrev && fromSegments.length > 0) {
-              fromPrev = fromSegments[0]
-            }
-
-            let toNext = toSegments[1]
-            if (!toNext && toSegments.length > 0) {
-              toNext = toSegments[0]
-            }
-
-            const distance = Math.hypot(
-              toStart.x - fromEnd.x,
-              toStart.y - fromEnd.y,
+            const p1 = transformPoint(geometry.start.x, geometry.start.y)
+            const cp1 = transformPoint(
+              geometry.controlPoint1.x,
+              geometry.controlPoint1.y,
             )
-            const projectionDistance = Math.min(distance * 0.5, 80 / scale)
-
-            const projectLine = (
-              x1: number,
-              y1: number,
-              x2: number,
-              y2: number,
-              dist: number,
-            ): [number, number] => {
-              const d = Math.hypot(y2 - y1, x2 - x1)
-              if (d === 0) return [x2, y2]
-              const vx = (x2 - x1) / d
-              const vy = (y2 - y1) / d
-              return [x2 + dist * vx, y2 + dist * vy]
-            }
-
-            const [cx1, cy1] = projectLine(
-              fromPrev.x,
-              fromPrev.y,
-              fromEnd.x,
-              fromEnd.y,
-              projectionDistance,
+            const cp2 = transformPoint(
+              geometry.controlPoint2.x,
+              geometry.controlPoint2.y,
             )
-            const [cx2, cy2] = projectLine(
-              toNext.x,
-              toNext.y,
-              toStart.x,
-              toStart.y,
-              projectionDistance,
-            )
-
-            const p1 = transformPoint(fromEnd.x + offsetX, fromEnd.y + offsetY)
-            const cp1 = transformPoint(cx1 + offsetX, cy1 + offsetY)
-            const cp2 = transformPoint(cx2 + offsetX, cy2 + offsetY)
-            const p2 = transformPoint(toStart.x + offsetX, toStart.y + offsetY)
-
-            ctx.strokeStyle = 'rgba(255, 105, 180, 0.3)'
-            ctx.lineWidth = edgeThreshold * scale
-            ctx.beginPath()
+            const p2 = transformPoint(geometry.end.x, geometry.end.y)
             ctx.moveTo(p1.x, p1.y)
             ctx.bezierCurveTo(cp1.x, cp1.y, cp2.x, cp2.y, p2.x, p2.y)
-            ctx.stroke()
           }
+
+          ctx.stroke()
         }
 
-        // Draw hit areas for all path offsets or single edge
         if (!drawPaths || numPaths === 0) {
-          drawHitArea(0, 0)
+          drawHitArea(displayEdge.representativeEdge, 0, 0)
         } else {
-          const dx = toStart.x - fromEnd.x
-          const dy = toStart.y - fromEnd.y
-          const len = Math.hypot(dx, dy)
-          if (len === 0) return
+          const offsetNormal = getEdgeOffsetNormal(displayEdge.representativeEdge)
 
-          const perpX = -dy / len
-          const perpY = dx / len
-          const offsetDist = 3 / scale
-
-          for (let pathIdx = 0; pathIdx < numPaths; pathIdx++) {
-            const offset = (pathIdx - (numPaths - 1) / 2) * offsetDist
-            const offsetX = perpX * offset
-            const offsetY = perpY * offset
-            drawHitArea(offsetX, offsetY)
-          }
+          visiblePathTraversals.forEach((traversal, pathIdx) => {
+            const offset = getEdgeOffset(pathIdx, numPaths, scale)
+            const offsetX = (offsetNormal?.x ?? 0) * offset
+            const offsetY = (offsetNormal?.y ?? 0) * offset
+            drawHitArea(traversal.edge, offsetX, offsetY)
+          })
         }
       })
     }
 
-    // Draw nodes
-    Object.entries(nodePositions).forEach(([nodeId, segments]) => {
-      const node = graph.nodes.find(n => n.id === nodeId)
-      if (!node) return
+    // Draw one visible node per contig rather than one node per orientation.
+    displayGraph.nodes.forEach(displayNode => {
+      const { representativeId, node, segments } = displayNode
+      if (segments.length === 0) return
 
       // Get color based on selected scheme
       const color = getNodeColor(node)
 
-      const isHovered = hoveredNode === nodeId
-      const isSelected = selectedNode === nodeId
+      const isHovered = hoveredNode === representativeId
+      const isSelected = selectedNode === representativeId
 
       ctx.strokeStyle = `rgb(${color.join(',')})`
       ctx.lineWidth = isSelected
@@ -930,8 +1001,11 @@ export function GraphCanvas({
     selectedNode,
     isDarkMode,
     getNodeColor,
-    getVisibleEdgePathIds,
-    modifiedNodePositions,
+    displayGraph,
+    getVisiblePathTraversals,
+    buildEdgeGeometry,
+    getEdgeOffset,
+    getEdgeOffsetNormal,
     contigThickness,
     connectorThickness,
     drawLabels,
@@ -1046,21 +1120,6 @@ export function GraphCanvas({
     return minDist
   }
 
-  // Helper function to project a point forward from a line segment (for hit detection)
-  const projectLineForHitDetection = (
-    x1: number,
-    y1: number,
-    x2: number,
-    y2: number,
-    distance: number,
-  ): [number, number] => {
-    const d = Math.hypot(y2 - y1, x2 - x1)
-    if (d === 0) return [x2, y2]
-    const vx = (x2 - x1) / d
-    const vy = (y2 - y1) / d
-    return [x2 + distance * vx, y2 + distance * vy]
-  }
-
   // Handle mouse down
   const handleMouseDown = useCallback(
     (e: React.MouseEvent<HTMLCanvasElement>) => {
@@ -1137,8 +1196,6 @@ export function GraphCanvas({
         setDragStart({ x: e.clientX, y: e.clientY })
       } else {
         // Hit detection for hover
-        const nodePositions =
-          modifiedNodePositions || layoutResult.nodePositions
         const { scale, translateX, translateY } = transform
 
         // Inverse transform to get graph coordinates
@@ -1149,7 +1206,8 @@ export function GraphCanvas({
         let foundNode: string | null = null
         const nodeThreshold = 5 / scale // Adjust with zoom
 
-        for (const [nodeId, segments] of Object.entries(nodePositions)) {
+        for (const displayNode of displayGraph.nodes) {
+          const { representativeId, segments } = displayNode
           for (let i = 0; i < segments.length - 1; i++) {
             const dist = distanceToSegment(
               graphX,
@@ -1161,7 +1219,7 @@ export function GraphCanvas({
             )
 
             if (dist < nodeThreshold) {
-              foundNode = nodeId
+              foundNode = representativeId
               break
             }
           }
@@ -1192,179 +1250,110 @@ export function GraphCanvas({
         let foundEdge: number | null = null
         const edgeThreshold = 10 / scale
 
-        for (let edgeIdx = 0; edgeIdx < graph.edges.length; edgeIdx++) {
-          const edge = graph.edges[edgeIdx]!
-
-          const fromSegments = nodePositions[edge.from]
-          const toSegments = nodePositions[edge.to]
-
-          if (!fromSegments || !toSegments) continue
-
-          const fromEnd = fromSegments[fromSegments.length - 1]
-          const toStart = toSegments[0]
-
-          if (!fromEnd || !toStart) continue
-
-          const isSelfLoop = edge.from === edge.to
-          const visibleEdgePathIds = getVisibleEdgePathIds(edge.pathIds)
-          const numPaths = visibleEdgePathIds.length
+        for (let edgeIdx = 0; edgeIdx < displayGraph.edges.length; edgeIdx++) {
+          const displayEdge = displayGraph.edges[edgeIdx]!
+          const visiblePathTraversals = getVisiblePathTraversals(
+            displayEdge.pathTraversals,
+          )
+          const numPaths = visiblePathTraversals.length
 
           let dist: number
 
-          // Helper to check distance for edge with offset
+          // Hit testing mirrors the exact Bezier geometry used in drawEdge()
+          // so the collapsed single-mode display stays clickable.
           const checkEdgeDistance = (
+            edge: (typeof graph.edges)[0],
             offsetX: number,
             offsetY: number,
           ): number => {
-            if (isSelfLoop) {
-              // Hit detection for self-loops (matches the drawing code)
-              // Get the direction of the last segment of the node
-              let segmentDirX = 1,
-                segmentDirY = 0
-              if (fromSegments.length >= 2) {
-                const prevSeg = fromSegments[fromSegments.length - 2]!
-                const lastSeg = fromSegments[fromSegments.length - 1]!
-                const dx = lastSeg.x - prevSeg.x
-                const dy = lastSeg.y - prevSeg.y
-                const len = Math.hypot(dx, dy)
-                if (len > 0) {
-                  segmentDirX = dx / len
-                  segmentDirY = dy / len
-                }
-              }
+            const geometry = buildEdgeGeometry(edge, offsetX, offsetY, scale)
+            if (!geometry) return Infinity
 
-              // Extension length for control points (in graph coordinates)
-              const extensionLength = 50 / scale
-
-              // Control points extended along the node direction (with offset)
-              const cp1x = fromEnd.x + offsetX + segmentDirX * extensionLength
-              const cp1y = fromEnd.y + offsetY + segmentDirY * extensionLength
-              const cp2x = toStart.x + offsetX - segmentDirX * extensionLength
-              const cp2y = toStart.y + offsetY - segmentDirY * extensionLength
-
-              // Perpendicular shift (normal vector)
-              const perpX = -segmentDirY
-              const perpY = segmentDirX
-              const perpShift = extensionLength
-
-              // Node midpoint (with offset)
-              const nodeMidX = (fromEnd.x + toStart.x) / 2 + offsetX
-              const nodeMidY = (fromEnd.y + toStart.y) / 2 + offsetY
-
-              // Shifted control points
-              const cp1ShiftedX = cp1x + perpX * perpShift
-              const cp1ShiftedY = cp1y + perpY * perpShift
-              const nodeMidShiftedX = nodeMidX + perpX * perpShift
-              const nodeMidShiftedY = nodeMidY + perpY * perpShift
-              const cp2ShiftedX = cp2x + perpX * perpShift
-              const cp2ShiftedY = cp2y + perpY * perpShift
-
-              // Check distance to both halves of the loop
+            if (geometry.kind === 'self-loop') {
               const dist1 = distanceToCubicBezier(
                 graphX,
                 graphY,
-                fromEnd.x + offsetX,
-                fromEnd.y + offsetY,
-                cp1x,
-                cp1y,
-                cp1ShiftedX,
-                cp1ShiftedY,
-                nodeMidShiftedX,
-                nodeMidShiftedY,
+                geometry.start.x,
+                geometry.start.y,
+                geometry.controlPoint1.x,
+                geometry.controlPoint1.y,
+                geometry.cp1Shifted.x,
+                geometry.cp1Shifted.y,
+                geometry.nodeMidShifted.x,
+                geometry.nodeMidShifted.y,
               )
 
               const dist2 = distanceToCubicBezier(
                 graphX,
                 graphY,
-                nodeMidShiftedX,
-                nodeMidShiftedY,
-                cp2ShiftedX,
-                cp2ShiftedY,
-                cp2x,
-                cp2y,
-                toStart.x + offsetX,
-                toStart.y + offsetY,
+                geometry.nodeMidShifted.x,
+                geometry.nodeMidShifted.y,
+                geometry.cp2Shifted.x,
+                geometry.cp2Shifted.y,
+                geometry.controlPoint2.x,
+                geometry.controlPoint2.y,
+                geometry.end.x,
+                geometry.end.y,
               )
 
               return Math.min(dist1, dist2)
-            } else {
-              // Regular edge hit detection
-              // Get trajectory vectors (same as drawing)
-              let fromPrev = fromSegments[fromSegments.length - 2]
-              if (!fromPrev && fromSegments.length > 0) {
-                fromPrev = fromSegments[0]
-              }
+            }
 
-              let toNext = toSegments[1]
-              if (!toNext && toSegments.length > 0) {
-                toNext = toSegments[0]
-              }
-
-              // Calculate control points (same as drawing)
-              const distance = Math.hypot(
-                toStart.x - fromEnd.x,
-                toStart.y - fromEnd.y,
-              )
-              const projectionDistance = Math.min(distance * 0.5, 80 / scale)
-
-              const [cx1, cy1] = projectLineForHitDetection(
-                fromPrev.x,
-                fromPrev.y,
-                fromEnd.x,
-                fromEnd.y,
-                projectionDistance,
-              )
-
-              const [cx2, cy2] = projectLineForHitDetection(
-                toNext.x,
-                toNext.y,
-                toStart.x,
-                toStart.y,
-                projectionDistance,
-              )
-
-              return distanceToCubicBezier(
+            if (geometry.kind === 'reverse-complement-loop') {
+              const dist1 = distanceToCubicBezier(
                 graphX,
                 graphY,
-                fromEnd.x + offsetX,
-                fromEnd.y + offsetY,
-                cx1 + offsetX,
-                cy1 + offsetY,
-                cx2 + offsetX,
-                cy2 + offsetY,
-                toStart.x + offsetX,
-                toStart.y + offsetY,
+                geometry.start.x,
+                geometry.start.y,
+                geometry.controlPoint1.x,
+                geometry.controlPoint1.y,
+                geometry.pathMidShifted.x,
+                geometry.pathMidShifted.y,
+                geometry.pathMidPoint.x,
+                geometry.pathMidPoint.y,
               )
+              const dist2 = distanceToCubicBezier(
+                graphX,
+                graphY,
+                geometry.pathMidPoint.x,
+                geometry.pathMidPoint.y,
+                geometry.pathMidShiftedOpposite.x,
+                geometry.pathMidShiftedOpposite.y,
+                geometry.controlPoint2.x,
+                geometry.controlPoint2.y,
+                geometry.end.x,
+                geometry.end.y,
+              )
+              return Math.min(dist1, dist2)
             }
+
+            return distanceToCubicBezier(
+              graphX,
+              graphY,
+              geometry.start.x,
+              geometry.start.y,
+              geometry.controlPoint1.x,
+              geometry.controlPoint1.y,
+              geometry.controlPoint2.x,
+              geometry.controlPoint2.y,
+              geometry.end.x,
+              geometry.end.y,
+            )
           }
 
-          // Check hit detection - either for single edge or all path offsets
           if (!drawPaths || numPaths === 0) {
-            // Single edge, no offsets
-            dist = checkEdgeDistance(0, 0)
+            dist = checkEdgeDistance(displayEdge.representativeEdge, 0, 0)
           } else {
-            // Multiple paths - check each offset
-            const dx = toStart.x - fromEnd.x
-            const dy = toStart.y - fromEnd.y
-            const len = Math.hypot(dx, dy)
-
-            if (len === 0) continue
-
-            // Perpendicular vector (rotated 90 degrees)
-            const perpX = -dy / len
-            const perpY = dx / len
-
-            // Offset distance in graph coordinates
-            const offsetDist = 3 / scale
-
+            const offsetNormal = getEdgeOffsetNormal(displayEdge.representativeEdge)
             let minDist = Infinity
-            for (let pathIdx = 0; pathIdx < numPaths; pathIdx++) {
-              const offset = (pathIdx - (numPaths - 1) / 2) * offsetDist
-              const offsetX = perpX * offset
-              const offsetY = perpY * offset
-              const d = checkEdgeDistance(offsetX, offsetY)
+
+            visiblePathTraversals.forEach((traversal, pathIdx) => {
+              const offset = getEdgeOffset(pathIdx, numPaths, scale)
+              const offsetX = (offsetNormal?.x ?? 0) * offset
+              const offsetY = (offsetNormal?.y ?? 0) * offset
+              const d = checkEdgeDistance(traversal.edge, offsetX, offsetY)
               minDist = Math.min(minDist, d)
-            }
+            })
             dist = minDist
           }
 
@@ -1413,6 +1402,11 @@ export function GraphCanvas({
       graph,
       modifiedNodePositions,
       refs,
+      displayGraph,
+      buildEdgeGeometry,
+      getVisiblePathTraversals,
+      getEdgeOffsetNormal,
+      getEdgeOffset,
     ],
   )
 
@@ -1608,20 +1602,13 @@ export function GraphCanvas({
                   }}
                 >
                   <div>
-                    <strong>ID:</strong> {node.id}
-                  </div>
-                  <div>
-                    <strong>Name:</strong> {node.name}
+                    <strong>ID:</strong> {node.name}
                   </div>
                   <div>
                     <strong>Length:</strong> {node.length.toLocaleString()} bp
                   </div>
                   <div>
                     <strong>Depth:</strong> {node.depth.toFixed(2)}×
-                  </div>
-                  <div>
-                    <strong>Strand:</strong>{' '}
-                    {node.id.endsWith('+') ? 'Positive (+)' : 'Negative (-)'}
                   </div>
                   <div>
                     <strong>Sequence:</strong>{' '}
@@ -1691,17 +1678,21 @@ export function GraphCanvas({
         !isDragging &&
         !isDraggingNode &&
         (() => {
-          const edge = graph.edges[hoveredEdge]
+          const edge = displayGraph.edges[hoveredEdge]
           if (!edge) return null
-          // When path overlays are enabled, the tooltip mirrors the filtered
-          // set so the count matches what the user can currently see.
-          const visibleEdgePathIds = drawPaths
-            ? getVisibleEdgePathIds(edge.pathIds)
-            : edge.pathIds ?? []
 
-          const fromNode = graph.nodes.find(n => n.id === edge.from)
-          const toNode = graph.nodes.find(n => n.id === edge.to)
+          const fromNode = displayGraph.nodesByKey.get(edge.fromNodeKey)?.node
+          const toNode = displayGraph.nodesByKey.get(edge.toNodeKey)?.node
           if (!fromNode || !toNode) return null
+
+          const visibleEdgePathIds = Array.from(
+            new Set(
+              (drawPaths
+                ? getVisiblePathTraversals(edge.pathTraversals)
+                : edge.pathTraversals
+              ).map(traversal => traversal.pathId),
+            ),
+          )
 
           return (
             <div
@@ -1727,9 +1718,9 @@ export function GraphCanvas({
                 <div
                   style={{ fontSize: '11px', marginTop: '4px', opacity: 0.8 }}
                 >
-                  {fromNode.name} → {toNode.name}
+                  {fromNode.name} — {toNode.name}
                 </div>
-                {edge.pathIds && edge.pathIds.length > 0 && (
+                {edge.pathIds.length > 0 && (
                   <div
                     style={{
                       fontSize: '11px',

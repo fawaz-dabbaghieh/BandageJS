@@ -1,0 +1,17 @@
+H	VN:Z:1.0
+# This graph is meant to regression-test single-mode display behavior:
+# - 1+ -> 2+ and 2- -> 1- should collapse into one visible edge
+# - 2+ -> 3+ exists without its reverse-complement pair
+# - path overlays should still preserve direction, including reverse traversals
+S	1	ACGTACGTACGT
+S	2	TGCAATGCAATG
+S	3	GATTACAGATTA
+S	4	CCCGGGTTTAAA
+L	1	+	2	+	0M
+L	2	-	1	-	0M
+L	2	+	3	+	0M
+L	3	+	4	-	0M
+L	4	+	4	+	0M
+P	forward_path	1+,2+,3+,4-	*
+P	reverse_path	4+,3-,2-,1-	*
+P	one_sided_path	2+,3+,4-	*

@@ -25,6 +25,11 @@ export const urlExamples: URLExample[] = [
     url: `${BASE_URL}example1.gfa`,
   },
   {
+    name: 'Single-mode RC regression',
+    description: 'Reverse-complement duplicate edges and directed paths',
+    url: `${BASE_URL}single_mode_rc_regression.gfa`,
+  },
+  {
     name: 'HPRC Chr1',
     description: 'HPRC Chr1 (vg find output)',
     url: `${BASE_URL}chr1_sub.gfa`,
